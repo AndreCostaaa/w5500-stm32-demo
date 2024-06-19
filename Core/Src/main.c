@@ -20,6 +20,7 @@
 #include "stm32l4xx_hal_uart.h"
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include "socket.h"
 #include "wizchip_conf.h"
 #include "dhcp.h"
@@ -37,11 +38,12 @@ static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_TIM16_Init(void);
+#ifdef DHCP
 static uint8_t dhcp_buffer[DHCP_BUFFER_SIZE];
+#endif
 static uint8_t tcp_buffer[TCP_BUFFER_SIZE];
-static uint8_t mac_address[] = { 0x0c, 0x29, 0xab, 0x7c, 0x00, 0x01 };
-static uint8_t src_ip[] = { 192, 168, 0, 2 };
-static uint8_t dst_ip[] = { 192, 168, 0, 1 };
+static uint8_t mac_address[] = { 0x12, 0xde, 0xc8, 0xcb, 0x05, 0xa1 };
+static uint8_t dst_ip[] = { 192, 168, 1, 247 };
 static const uint16_t dst_port = 4000;
 
 // static wiz_NetInfo info->= { .gw = { 192, 168, 1, 1 },
@@ -121,11 +123,11 @@ void get_chip_id(char *buffer)
 }
 void get_network_info(wiz_NetInfo *info)
 {
-	ctlnetwork(CN_GET_NETINFO, (void *)&info);
+	ctlnetwork(CN_GET_NETINFO, info);
 }
 void get_timeout_info(wiz_NetTimeout *timeout)
 {
-	ctlnetwork(CN_GET_TIMEOUT, (void *)&timeout);
+	ctlnetwork(CN_GET_TIMEOUT, timeout);
 }
 
 void print_network_info(const char *chip_id, const wiz_NetInfo *info,
@@ -137,11 +139,11 @@ void print_network_info(const char *chip_id, const wiz_NetInfo *info,
 	printf("MAC: %02X:%02X:%02X:%02X:%02X:%02X\r\n", info->mac[0],
 	       info->mac[1], info->mac[2], info->mac[3], info->mac[4],
 	       info->mac[5]);
-	printf("SIP: %d.%d.%d.%d\r\n", info->ip[0], info->ip[1], info->ip[2],
+	printf("IP: %d.%d.%d.%d\r\n", info->ip[0], info->ip[1], info->ip[2],
 	       info->ip[3]);
-	printf("GAR: %d.%d.%d.%d\r\n", info->gw[0], info->gw[1], info->gw[2],
+	printf("GATEWAY: %d.%d.%d.%d\r\n", info->gw[0], info->gw[1], info->gw[2],
 	       info->gw[3]);
-	printf("SUB: %d.%d.%d.%d\r\n", info->sn[0], info->sn[1], info->sn[2],
+	printf("MASK: %d.%d.%d.%d\r\n", info->sn[0], info->sn[1], info->sn[2],
 	       info->sn[3]);
 	printf("DNS: %d.%d.%d.%d\r\n", info->dns[0], info->dns[1], info->dns[2],
 	       info->dns[3]);
@@ -314,14 +316,20 @@ int main(void)
 			on_dhcp_ip_conflict);
 	DHCP_init(DHCP_SOCKET, dhcp_buffer);
 #else
-	wiz_NetInfo info = { .gw = { 192, 168, 0, 1 },
-			     .ip = { 192, 168, 0, 2 },
+	wiz_NetInfo info = {
+				 .gw = { 192, 168, 1, 1 },
+			     .ip = { 192, 168, 1, 200 },
 			     .sn = { 255, 255, 255, 0 },
-			     .mac = { 0x0c, 0x29, 0xab, 0x7c, 0x00, 0x01 },
 			     .dhcp = NETINFO_STATIC };
+	memcpy(info.mac, mac_address, sizeof(mac_address));
+	wiz_NetTimeout timeout;
+	char chip_id[6];
 	network_init(&info, &wiznet_timeout);
+	get_network_info(&info);
+	get_timeout_info(&timeout);
+	get_chip_id(chip_id);
+	print_network_info(chip_id, &info, &timeout);
 #endif
-
 	printf("Hello World!\r\n");
 	while (1) {
 #ifdef DHCP
