@@ -9,6 +9,15 @@ RM := rm -rf
 
 # All of the sources participating in the build are defined here
 -include sources.mk
+-include Drivers/ioLibrary_Driver/Internet/DHCP/subdir.mk
+-include Drivers/ioLibrary_Driver/Ethernet/W5500/subdir.mk
+-include Drivers/ioLibrary_Driver/Ethernet/W5300/subdir.mk
+-include Drivers/ioLibrary_Driver/Ethernet/W5200/subdir.mk
+-include Drivers/ioLibrary_Driver/Ethernet/W5100S/subdir.mk
+-include Drivers/ioLibrary_Driver/Ethernet/W5100/subdir.mk
+-include Drivers/ioLibrary_Driver/Ethernet/subdir.mk
+-include Drivers/ioLibrary_Driver/Application/multicast/subdir.mk
+-include Drivers/ioLibrary_Driver/Application/loopback/subdir.mk
 -include Drivers/STM32L4xx_HAL_Driver/subdir.mk
 -include Core/Startup/subdir.mk
 -include Core/Src/subdir.mk
