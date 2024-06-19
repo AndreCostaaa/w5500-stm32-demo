@@ -15,29 +15,284 @@
   ******************************************************************************
   */
 #include "main.h"
+#include "stm32l4xx_hal_spi.h"
+#include "stm32l4xx_hal_tim.h"
 #include "stm32l4xx_hal_uart.h"
 #include <stdint.h>
 #include <stdio.h>
+#include "socket.h"
+#include "wizchip_conf.h"
+#include "dhcp.h"
+
+#define DHCP_BUFFER_SIZE 2048
+#define TCP_BUFFER_SIZE	 2048
+#define DHCP_SOCKET	 0
+#define TCP_SOCKET	 (DHCP_SOCKET + 1)
 
 SPI_HandleTypeDef w5500_spi;
-
 UART_HandleTypeDef console_uart;
-
+TIM_HandleTypeDef htim16;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_SPI1_Init(void);
+static void MX_TIM16_Init(void);
+static uint8_t dhcp_buffer[DHCP_BUFFER_SIZE];
+static uint8_t tcp_buffer[TCP_BUFFER_SIZE];
+static uint8_t mac_address[] = { 0x0c, 0x29, 0xab, 0x7c, 0x00, 0x01 };
+static uint8_t src_ip[] = { 192, 168, 0, 2 };
+static uint8_t dst_ip[] = { 192, 168, 0, 1 };
+static const uint16_t dst_port = 4000;
+
+// static wiz_NetInfo info->= { .gw = { 192, 168, 1, 1 },
+// 				   .sn = { 255, 255, 255, 0 },
+// 				   .mac = { 0xc3, 0xfb, 0x79, 0x7d, 0x88,
+// 					    0x6d },
+// 				   .dhcp_mode = NETINFO_DHCP };
+static wiz_NetTimeout wiznet_timeout = { .retry_cnt = 3, .time_100us = 2000 };
+
+//Used by _write syscall (printf)
 int __io_putchar(int byte)
 {
 	return HAL_UART_Transmit(&console_uart, (uint8_t *)&byte, 1, 100);
 }
 
+void crit_section_enter(void)
+{
+	__set_PRIMASK(1);
+}
+
+void crit_section_leave(void)
+{
+	__set_PRIMASK(0);
+}
+
+void spi_cs_select(void)
+{
+	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET);
+}
+void spi_cs_deselect(void)
+{
+	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);
+}
+void spi_read(uint8_t *buf, uint16_t size)
+{
+	HAL_StatusTypeDef ret = HAL_SPI_Receive(&w5500_spi, buf, size, 100);
+	if (ret != HAL_OK) {
+		printf("Failed to read\r\n");
+		//Handle error
+	}
+}
+void spi_write(uint8_t *buf, uint16_t size)
+{
+	HAL_StatusTypeDef ret = HAL_SPI_Transmit(&w5500_spi, buf, size, 100);
+	if (ret != HAL_OK) {
+		printf("Failed to read\r\n");
+		//Handle error
+	}
+}
+uint8_t spi_read_byte(void)
+{
+	uint8_t data;
+
+	spi_read(&data, 1);
+	return data;
+}
+void spi_write_byte(uint8_t data)
+{
+	spi_write(&data, 1);
+}
+
+void register_callbacks(void)
+{
+	//critical section
+	reg_wizchip_cris_cbfunc(crit_section_enter, crit_section_leave);
+	//chip select
+	reg_wizchip_cs_cbfunc(spi_cs_select, spi_cs_deselect);
+	//spi
+	reg_wizchip_spi_cbfunc(spi_read_byte, spi_write_byte);
+	//spi burst
+	reg_wizchip_spiburst_cbfunc(spi_read, spi_write);
+}
+
+void get_chip_id(char *buffer)
+{
+	ctlwizchip(CW_GET_ID, (void *)buffer);
+}
+void get_network_info(wiz_NetInfo *info)
+{
+	ctlnetwork(CN_GET_NETINFO, (void *)&info);
+}
+void get_timeout_info(wiz_NetTimeout *timeout)
+{
+	ctlnetwork(CN_GET_TIMEOUT, (void *)&timeout);
+}
+
+void print_network_info(const char *chip_id, const wiz_NetInfo *info,
+			const wiz_NetTimeout *timeout)
+{
+	printf("TIMEOUT: %d, %d\r\n", timeout->retry_cnt, timeout->time_100us);
+
+	printf("\r\n=== %s NET CONF ===\r\n", chip_id);
+	printf("MAC: %02X:%02X:%02X:%02X:%02X:%02X\r\n", info->mac[0],
+	       info->mac[1], info->mac[2], info->mac[3], info->mac[4],
+	       info->mac[5]);
+	printf("SIP: %d.%d.%d.%d\r\n", info->ip[0], info->ip[1], info->ip[2],
+	       info->ip[3]);
+	printf("GAR: %d.%d.%d.%d\r\n", info->gw[0], info->gw[1], info->gw[2],
+	       info->gw[3]);
+	printf("SUB: %d.%d.%d.%d\r\n", info->sn[0], info->sn[1], info->sn[2],
+	       info->sn[3]);
+	printf("DNS: %d.%d.%d.%d\r\n", info->dns[0], info->dns[1], info->dns[2],
+	       info->dns[3]);
+	printf("======================\r\n");
+}
+void network_init(wiz_NetInfo *info, wiz_NetTimeout *timeout)
+{
+	ctlnetwork(CN_SET_TIMEOUT, (void *)timeout);
+	ctlnetwork(CN_SET_NETINFO, (void *)info);
+}
+
+void on_dhcp_ip_assign(void)
+{
+	wiz_NetInfo info;
+	getIPfromDHCP(info.ip);
+	getGWfromDHCP(info.gw);
+	getSNfromDHCP(info.sn);
+	getDNSfromDHCP(info.dns);
+	info.dhcp = NETINFO_DHCP;
+
+	network_init(&info, &wiznet_timeout);
+	printf("DHCP LEASED TIME : %u Sec.\r\n", getDHCPLeasetime());
+}
+void on_dhcp_ip_renewed(void)
+{
+	printf("DHCP IP RENEWED\r\n");
+	on_dhcp_ip_assign();
+}
+void on_dhcp_ip_conflict(void)
+{
+	printf("DHCP IP CONFLICT\r\n");
+	Error_Handler();
+}
+void handle_dhcp(void)
+{
+	static uint8_t old_dhcp_ret = -1;
+
+	uint8_t dhcp_ret = DHCP_run();
+	switch (dhcp_ret) {
+	case DHCP_FAILED: ///< Processing Fail
+		if (dhcp_ret != old_dhcp_ret) {
+			printf("DHCP FAILED\r\n");
+		}
+		break;
+	case DHCP_RUNNING: ///< Processing DHCP protocol
+		if (dhcp_ret != old_dhcp_ret) {
+			printf("DHCP RUNNING\r\n");
+		}
+		break;
+	case DHCP_IP_ASSIGN: ///< First Occupy IP from DHPC server      (if cbfunc == null, act as default default_ip_assign)
+		if (dhcp_ret != old_dhcp_ret) {
+			printf("DHCP IP ASSIGN\r\n");
+		}
+		break;
+	case DHCP_IP_CHANGED: ///< Change IP address by new ip from DHCP (if cbfunc == null, act as default default_ip_update)
+		if (dhcp_ret != old_dhcp_ret) {
+			printf("DHCP IP CHANGED\r\n");
+		}
+		break;
+	case DHCP_IP_LEASED: ///< Stand by
+		if (dhcp_ret != old_dhcp_ret) {
+			printf("DHCP IP LEASED\r\n");
+		}
+		break;
+	case DHCP_STOPPED: ///< Stop processing DHCP protocol
+		if (dhcp_ret != old_dhcp_ret) {
+			printf("DHCP IP STOPPED\r\n");
+		}
+		break;
+	default:
+		break;
+	}
+	old_dhcp_ret = dhcp_ret;
+}
+void handle_tcp_connection(void)
+{
+	int32_t size, size_tx_sent = 0;
+	static uint16_t current_port = 50000;
+	switch (getSn_SR(TCP_SOCKET)) {
+	case SOCK_ESTABLISHED:
+
+		if (getSn_IR(TCP_SOCKET) & Sn_IR_CON) { // Interrupt flag
+			setSn_IR(TCP_SOCKET, Sn_IR_CON); // clear interrupt flag
+		}
+		if ((size = getSn_RX_RSR(TCP_SOCKET)) <= 0) {
+			break;
+		}
+		if (size > TCP_BUFFER_SIZE) {
+			size = TCP_BUFFER_SIZE;
+		}
+		size = recv(TCP_SOCKET, tcp_buffer, size);
+		if (size <= 0) {
+			printf("Received failed %d\r\n", size);
+			break;
+		}
+		for (int32_t i = 0; i < size; ++i) {
+			tcp_buffer[i]++;
+		}
+		while (size_tx_sent < size) {
+			size_tx_sent += send(TCP_SOCKET,
+					     tcp_buffer + size_tx_sent, size);
+			if (size_tx_sent < 0) {
+				printf("Send Error %d. Closing socket\r\n",
+				       size_tx_sent);
+				close(TCP_SOCKET);
+				return;
+			}
+		}
+		break;
+	case SOCK_CLOSE_WAIT:
+		if (disconnect(TCP_SOCKET) != SOCK_OK) {
+			break;
+		}
+		printf("Socket closed\r\n");
+		break;
+	case SOCK_INIT:
+		printf("Connecting to %d.%d.%d.%d:%d\r\n", dst_ip[0], dst_ip[1],
+		       dst_ip[2], dst_ip[3], dst_port);
+		if (connect(TCP_SOCKET, dst_ip, dst_port) != SOCK_OK) {
+			return;
+		}
+		printf("Connected !\r\n");
+		break;
+	case SOCK_CLOSED:
+		printf("sock closed !\r\n");
+		close(TCP_SOCKET);
+		if (socket(TCP_SOCKET, Sn_MR_TCP, current_port++, 0x00) !=
+		    TCP_SOCKET) {
+			if (current_port == 0xffff) {
+				current_port = 50000;
+			}
+			break;
+		}
+		break;
+	}
+}
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+	if (htim == &htim16) {
+		DHCP_time_handler();
+	}
+}
 /**
   * @brief  The application entry point.
   * @retval int
   */
 int main(void)
 {
+	uint8_t memsize[2][8] = { { 2, 2, 2, 2, 2, 2, 2, 2 },
+				  { 2, 2, 2, 2, 2, 2, 2, 2 } };
 	HAL_Init();
 
 	SystemClock_Config();
@@ -45,9 +300,34 @@ int main(void)
 	MX_GPIO_Init();
 	MX_USART2_UART_Init();
 	MX_SPI1_Init();
-	printf("Hello World!\r\n");
+	MX_TIM16_Init();
 
+	register_callbacks();
+	if (ctlwizchip(0, (void *)memsize) == -1) {
+		printf("WIZCHIP Initialized fail.\r\n");
+		Error_Handler();
+	}
+
+#ifdef DHCP
+	setSHAR(mac_address);
+	reg_dhcp_cbfunc(on_dhcp_ip_assign, on_dhcp_ip_renewed,
+			on_dhcp_ip_conflict);
+	DHCP_init(DHCP_SOCKET, dhcp_buffer);
+#else
+	wiz_NetInfo info = { .gw = { 192, 168, 0, 1 },
+			     .ip = { 192, 168, 0, 2 },
+			     .sn = { 255, 255, 255, 0 },
+			     .mac = { 0x0c, 0x29, 0xab, 0x7c, 0x00, 0x01 },
+			     .dhcp = NETINFO_STATIC };
+	network_init(&info, &wiznet_timeout);
+#endif
+
+	printf("Hello World!\r\n");
 	while (1) {
+#ifdef DHCP
+		handle_dhcp();
+#endif
+		handle_tcp_connection();
 	}
 }
 
@@ -98,6 +378,25 @@ void SystemClock_Config(void)
 	    HAL_OK) {
 		Error_Handler();
 	}
+}
+/**
+  * @brief TIM16 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM16_Init(void)
+{
+	htim16.Instance = TIM16;
+	htim16.Init.Prescaler = 8000 - 1;
+	htim16.Init.CounterMode = TIM_COUNTERMODE_UP;
+	htim16.Init.Period = 10000 - 1;
+	htim16.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+	htim16.Init.RepetitionCounter = 0;
+	htim16.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+	if (HAL_TIM_Base_Init(&htim16) != HAL_OK) {
+		Error_Handler();
+	}
+	HAL_TIM_Base_Start_IT(&htim16);
 }
 
 /**
@@ -180,7 +479,6 @@ static void MX_GPIO_Init(void)
 	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
 	HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 }
-
 /**
   * @brief  This function is executed in case of error occurrence.
   * @retval None
@@ -195,7 +493,6 @@ void Error_Handler(void)
 	/* USER CODE END Error_Handler_Debug */
 }
 
-#ifdef USE_FULL_ASSERT
 /**
   * @brief  Reports the name of the source file and the source line number
   *         where the assert_param error has occurred.
@@ -205,9 +502,5 @@ void Error_Handler(void)
   */
 void assert_failed(uint8_t *file, uint32_t line)
 {
-	/* USER CODE BEGIN 6 */
-	/* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
-	/* USER CODE END 6 */
+	printf("Wrong parameters value: file %s on line %d\r\n", file, line);
 }
-#endif /* USE_FULL_ASSERT */
