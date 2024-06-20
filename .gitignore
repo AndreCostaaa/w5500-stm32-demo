@@ -68,3 +68,5 @@ compile_commands.json
 *.elf
 *.cyclo
 *.cache*
+Debug
+Release
