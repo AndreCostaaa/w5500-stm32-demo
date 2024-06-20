@@ -25,6 +25,7 @@
 #include "wizchip_conf.h"
 #include "dhcp.h"
 
+#define DHCP
 #define DHCP_BUFFER_SIZE 2048
 #define TCP_BUFFER_SIZE	 2048
 #define DHCP_SOCKET	 0
@@ -43,14 +44,9 @@ static uint8_t dhcp_buffer[DHCP_BUFFER_SIZE];
 #endif
 static uint8_t tcp_buffer[TCP_BUFFER_SIZE];
 static uint8_t mac_address[] = { 0x12, 0xde, 0xc8, 0xcb, 0x05, 0xa1 };
-static uint8_t dst_ip[] = { 192, 168, 1, 247 };
+static uint8_t dst_ip[] = { 192, 168, 1, 246 };
 static const uint16_t dst_port = 4000;
 
-// static wiz_NetInfo info->= { .gw = { 192, 168, 1, 1 },
-// 				   .sn = { 255, 255, 255, 0 },
-// 				   .mac = { 0xc3, 0xfb, 0x79, 0x7d, 0x88,
-// 					    0x6d },
-// 				   .dhcp_mode = NETINFO_DHCP };
 static wiz_NetTimeout wiznet_timeout = { .retry_cnt = 3, .time_100us = 2000 };
 
 //Used by _write syscall (printf)
@@ -141,8 +137,8 @@ void print_network_info(const char *chip_id, const wiz_NetInfo *info,
 	       info->mac[5]);
 	printf("IP: %d.%d.%d.%d\r\n", info->ip[0], info->ip[1], info->ip[2],
 	       info->ip[3]);
-	printf("GATEWAY: %d.%d.%d.%d\r\n", info->gw[0], info->gw[1], info->gw[2],
-	       info->gw[3]);
+	printf("GATEWAY: %d.%d.%d.%d\r\n", info->gw[0], info->gw[1],
+	       info->gw[2], info->gw[3]);
 	printf("MASK: %d.%d.%d.%d\r\n", info->sn[0], info->sn[1], info->sn[2],
 	       info->sn[3]);
 	printf("DNS: %d.%d.%d.%d\r\n", info->dns[0], info->dns[1], info->dns[2],
@@ -158,6 +154,7 @@ void network_init(wiz_NetInfo *info, wiz_NetTimeout *timeout)
 void on_dhcp_ip_assign(void)
 {
 	wiz_NetInfo info;
+	char chip_id[6];
 	getIPfromDHCP(info.ip);
 	getGWfromDHCP(info.gw);
 	getSNfromDHCP(info.sn);
@@ -165,6 +162,9 @@ void on_dhcp_ip_assign(void)
 	info.dhcp = NETINFO_DHCP;
 
 	network_init(&info, &wiznet_timeout);
+
+	get_chip_id(chip_id);
+	print_network_info(chip_id, &info, &wiznet_timeout);
 	printf("DHCP LEASED TIME : %u Sec.\r\n", getDHCPLeasetime());
 }
 void on_dhcp_ip_renewed(void)
@@ -268,14 +268,12 @@ void handle_tcp_connection(void)
 		printf("Connected !\r\n");
 		break;
 	case SOCK_CLOSED:
-		printf("sock closed !\r\n");
 		close(TCP_SOCKET);
 		if (socket(TCP_SOCKET, Sn_MR_TCP, current_port++, 0x00) !=
 		    TCP_SOCKET) {
-			if (current_port == 0xffff) {
-				current_port = 50000;
-			}
-			break;
+		}
+		if (current_port == 0xffff) {
+			current_port = 50000;
 		}
 		break;
 	}
@@ -316,8 +314,7 @@ int main(void)
 			on_dhcp_ip_conflict);
 	DHCP_init(DHCP_SOCKET, dhcp_buffer);
 #else
-	wiz_NetInfo info = {
-				 .gw = { 192, 168, 1, 1 },
+	wiz_NetInfo info = { .gw = { 192, 168, 1, 1 },
 			     .ip = { 192, 168, 1, 200 },
 			     .sn = { 255, 255, 255, 0 },
 			     .dhcp = NETINFO_STATIC };
